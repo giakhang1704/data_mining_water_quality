@@ -64,9 +64,9 @@
     <div class="info-panel">
         <h4>Trạm Quan Trắc (1980-2022)</h4>
         <div class="legend">
-            <p><i style="background: #f97316; border-radius: 50%;"></i> Cluster 0</p>
-            <p><i style="background: #0ea5e9; border-radius: 50%;"></i> Cluster 1</p>
-            <p><i style="background: #22c55e; border-radius: 50%;"></i> Cluster 2</p>
+            <p><i style="background: #4CAF50; border-radius: 50%;"></i> Cluster 0</p>
+            <p><i style="background: #FFC107; border-radius: 50%;"></i> Cluster 1</p>
+            <p><i style="background: #F44336; border-radius: 50%;"></i> Cluster 2</p>
         </div>
         <hr>
         <p><small id="stats">Đang tải dữ liệu trạm...</small></p>
@@ -78,14 +78,14 @@
                 <option value="ocean">Đại dương</option>
             </select>
 
-            <label for="yearFilter">Lọc theo năm</label>
-            <select id="yearFilter">
-                <option value="all">Tất cả năm</option>
+            <label for="locationFilter">Lọc theo location</label>
+            <select id="locationFilter">
+                <option value="all">Tất cả location</option>
             </select>
 
-            <label for="monthFilter">Lọc theo tháng</label>
-            <select id="monthFilter">
-                <option value="all">Tất cả tháng</option>
+            <label for="yearMonthFilter">Lọc theo tháng/năm</label>
+            <select id="yearMonthFilter">
+                <option value="all">Tất cả</option>
             </select>
             <div id="clusterStats" class="cluster-legend">Đang tải cụm...</div>
         </div>
@@ -107,15 +107,15 @@
         }).setView([35.0, 105.0], 4);
 
         var datasetFilterEl = document.getElementById('datasetFilter');
-        var yearFilterEl = document.getElementById('yearFilter');
-        var monthFilterEl = document.getElementById('monthFilter');
+        var locationFilterEl = document.getElementById('locationFilter');
+        var yearMonthFilterEl = document.getElementById('yearMonthFilter');
         var clusterStatsEl = document.getElementById('clusterStats');
         var stationIndex = {};
         var allClusterRows = [];
         var CLUSTER_COLORS = {
-            0: '#f97316',
-            1: '#0ea5e9',
-            2: '#22c55e'
+            0: '#4CAF50',
+            1: '#FFC107',
+            2: '#F44336'
         };
 
         var esriStreet = L.tileLayer(
@@ -198,7 +198,15 @@
                         stationId: String(row.MonitoringLocationIdentifier),
                         year: Number.isFinite(yearFromDate) ? yearFromDate : null,
                         month: Number.isFinite(month) ? month : null,
-                        cluster: Number(row.cluster_agglomerative_3)
+                        cluster: Number(row.cluster_agglomerative_3),
+                        CODMn: type === 'land' ? (Number.isFinite(Number(row.CODMn)) ? Number(row.CODMn) : null) : null,
+                        DO: Number.isFinite(Number(row.DO)) ? Number(row.DO) : null,
+                        NH4N: type === 'land' ? (Number.isFinite(Number(row.NH4N)) ? Number(row.NH4N) : null) : null,
+                        pH: Number.isFinite(Number(row.pH)) ? Number(row.pH) : null,
+                        COD: type === 'ocean' ? (Number.isFinite(Number(row.COD)) ? Number(row.COD) : null) : null,
+                        DIN: type === 'ocean' ? (Number.isFinite(Number(row.DIN)) ? Number(row.DIN) : null) : null,
+                        DIP: type === 'ocean' ? (Number.isFinite(Number(row.DIP)) ? Number(row.DIP) : null) : null,
+                        TPH: type === 'ocean' ? (Number.isFinite(Number(row.TPH)) ? Number(row.TPH) : null) : null
                     };
                 })
                 .filter(function(r) {
@@ -248,6 +256,61 @@
                 });
         }
 
+        function updateYearMonthOptions(rows) {
+            // Clear existing options except "all"
+            while (yearMonthFilterEl.children.length > 1) {
+                yearMonthFilterEl.removeChild(yearMonthFilterEl.lastChild);
+            }
+            var yearMonths = new Set();
+            rows.forEach(function(row) {
+                if (Number.isFinite(row.year) && Number.isFinite(row.month)) {
+                    yearMonths.add(row.month + '/' + row.year);
+                }
+            });
+            Array.from(yearMonths).sort(function(a, b) {
+                var [ma, ya] = a.split('/').map(Number);
+                var [mb, yb] = b.split('/').map(Number);
+                if (ya !== yb) return ya - yb;
+                return ma - mb;
+            }).forEach(function(ym) {
+                var option = document.createElement('option');
+                option.value = ym;
+                option.textContent = ym;
+                yearMonthFilterEl.appendChild(option);
+            });
+        }
+
+        function getFilteredRows() {
+            var selectedDataset = datasetFilterEl.value;
+            var selectedLocation = locationFilterEl.value;
+            var rows = allClusterRows;
+            if (selectedDataset !== 'all') {
+                rows = rows.filter(function(row) { return row.type === selectedDataset; });
+            }
+            if (selectedLocation !== 'all') {
+                rows = rows.filter(function(row) {
+                    var station = stationIndex[row.stationId];
+                    return station && station.location === selectedLocation;
+                });
+            }
+            return rows;
+        }
+
+        function fillLocationOptions(stations) {
+            var locations = new Set();
+            stations.forEach(function(station) {
+                if (station.location) {
+                    locations.add(station.location);
+                }
+            });
+            Array.from(locations).sort().forEach(function(loc) {
+                var option = document.createElement('option');
+                option.value = loc;
+                option.textContent = loc;
+                locationFilterEl.appendChild(option);
+            });
+        }
+
         function pickMajorityCluster(clusterCounts) {
             var bestCluster = null;
             var bestCount = -1;
@@ -263,8 +326,8 @@
 
         function renderClusters() {
             var selectedDataset = datasetFilterEl.value;
-            var selectedYear = yearFilterEl.value;
-            var selectedMonth = monthFilterEl.value;
+            var selectedLocation = locationFilterEl.value;
+            var selectedYearMonth = yearMonthFilterEl.value;
 
             landLayer.clearLayers();
             oceanLayer.clearLayers();
@@ -273,13 +336,17 @@
             if (selectedDataset !== 'all') {
                 rows = rows.filter(function(row) { return row.type === selectedDataset; });
             }
-            if (selectedYear !== 'all') {
-                var y = Number(selectedYear);
-                rows = rows.filter(function(row) { return row.year === y; });
+            if (selectedLocation !== 'all') {
+                rows = rows.filter(function(row) {
+                    var station = stationIndex[row.stationId];
+                    return station && station.location === selectedLocation;
+                });
             }
-            if (selectedMonth !== 'all') {
-                var m = Number(selectedMonth);
-                rows = rows.filter(function(row) { return row.month === m; });
+            if (selectedYearMonth !== 'all') {
+                var parts = selectedYearMonth.split('/');
+                var m = Number(parts[0]);
+                var y = Number(parts[1]);
+                rows = rows.filter(function(row) { return row.year === y && row.month === m; });
             }
 
             var stationClusterVotes = {};
@@ -299,6 +366,24 @@
                     stationClusterVotes[stationKey].votes[row.cluster] = 0;
                 }
                 stationClusterVotes[stationKey].votes[row.cluster] += 1;
+            });
+
+            var stationAverages = {};
+            rows.forEach(function(row) {
+                var stationKey = row.type + '_' + row.stationId;
+                if (!stationAverages[stationKey]) {
+                    stationAverages[stationKey] = {
+                        CODMn: [], DO: [], NH4N: [], pH: [], COD: [], DIN: [], DIP: [], TPH: []
+                    };
+                }
+                if (row.CODMn !== null) stationAverages[stationKey].CODMn.push(row.CODMn);
+                if (row.DO !== null) stationAverages[stationKey].DO.push(row.DO);
+                if (row.NH4N !== null) stationAverages[stationKey].NH4N.push(row.NH4N);
+                if (row.pH !== null) stationAverages[stationKey].pH.push(row.pH);
+                if (row.COD !== null) stationAverages[stationKey].COD.push(row.COD);
+                if (row.DIN !== null) stationAverages[stationKey].DIN.push(row.DIN);
+                if (row.DIP !== null) stationAverages[stationKey].DIP.push(row.DIP);
+                if (row.TPH !== null) stationAverages[stationKey].TPH.push(row.TPH);
             });
 
             var clusterCounts = {
@@ -324,13 +409,28 @@
                 }
                 clusterCounts[stationType][clusterId] += 1;
 
+                var avg = stationAverages[stationKey];
+                var avgCODMn = avg.CODMn.length ? (avg.CODMn.reduce((a,b)=>a+b,0)/avg.CODMn.length).toFixed(2) : 'N/A';
+                var avgDO = avg.DO.length ? (avg.DO.reduce((a,b)=>a+b,0)/avg.DO.length).toFixed(2) : 'N/A';
+                var avgNH4N = avg.NH4N.length ? (avg.NH4N.reduce((a,b)=>a+b,0)/avg.NH4N.length).toFixed(2) : 'N/A';
+                var avgpH = avg.pH.length ? (avg.pH.reduce((a,b)=>a+b,0)/avg.pH.length).toFixed(2) : 'N/A';
+                var avgCOD = avg.COD.length ? (avg.COD.reduce((a,b)=>a+b,0)/avg.COD.length).toFixed(2) : 'N/A';
+                var avgDIN = avg.DIN.length ? (avg.DIN.reduce((a,b)=>a+b,0)/avg.DIN.length).toFixed(2) : 'N/A';
+                var avgDIP = avg.DIP.length ? (avg.DIP.reduce((a,b)=>a+b,0)/avg.DIP.length).toFixed(2) : 'N/A';
+                var avgTPH = avg.TPH.length ? (avg.TPH.reduce((a,b)=>a+b,0)/avg.TPH.length).toFixed(2) : 'N/A';
+
                 var marker = L.circleMarker([station.lat, station.lon], markerStyleByCluster(clusterId));
-                marker.bindPopup(
-                    '<b>ID trạm:</b> ' + stationId + '<br>' +
+                var popupContent = '<b>ID trạm:</b> ' + stationId + '<br>' +
                     '<b>Loại:</b> ' + toTypeLabel(stationType) + '<br>' +
+                    '<b>Location:</b> ' + (station.location || 'N/A') + '<br>' +
                     '<b>cluster_agglomerative_3:</b> ' + clusterId + '<br>' +
-                    '<b>Tọa độ:</b> ' + Number(station.lat).toFixed(5) + ', ' + Number(station.lon).toFixed(5)
-                );
+                    '<b>Tọa độ:</b> ' + Number(station.lat).toFixed(5) + ', ' + Number(station.lon).toFixed(5);
+                if (stationType === 'land') {
+                    popupContent += '<br><b>CODMn:</b> ' + avgCODMn + '<br><b>DO:</b> ' + avgDO + '<br><b>NH4N:</b> ' + avgNH4N + '<br><b>pH:</b> ' + avgpH;
+                } else {
+                    popupContent += '<br><b>COD:</b> ' + avgCOD + '<br><b>DIN:</b> ' + avgDIN + '<br><b>DIP:</b> ' + avgDIP + '<br><b>DO:</b> ' + avgDO + '<br><b>TPH:</b> ' + avgTPH + '<br><b>pH:</b> ' + avgpH;
+                }
+                marker.bindPopup(popupContent);
                 if (stationType === 'land') {
                     marker.addTo(landLayer);
                 } else {
@@ -381,6 +481,7 @@
                 }
                 var stations = payload.stations || [];
                 buildStationIndex(stations);
+                fillLocationOptions(stations);
 
                 L.control.layers({
                     'Esri Street (ít bị chặn)': esriStreet,
@@ -399,11 +500,19 @@
                 ]);
                 allClusterRows = clusterData[0].concat(clusterData[1]);
 
-                fillFilterOptions(allClusterRows);
+                updateYearMonthOptions(allClusterRows);
 
-                datasetFilterEl.addEventListener('change', renderClusters);
-                yearFilterEl.addEventListener('change', renderClusters);
-                monthFilterEl.addEventListener('change', renderClusters);
+                datasetFilterEl.addEventListener('change', function() {
+                    yearMonthFilterEl.value = 'all';
+                    updateYearMonthOptions(getFilteredRows());
+                    renderClusters();
+                });
+                locationFilterEl.addEventListener('change', function() {
+                    yearMonthFilterEl.value = 'all';
+                    updateYearMonthOptions(getFilteredRows());
+                    renderClusters();
+                });
+                yearMonthFilterEl.addEventListener('change', renderClusters);
 
                 renderClusters();
 

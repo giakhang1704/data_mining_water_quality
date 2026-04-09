@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -51,6 +54,83 @@ def prepare_data(df, zero_values=None):
         })
     data = data.sort_values(['MonitoringLocationIdentifier', 'MonitoringDate']).reset_index(drop=True)
     return data
+
+
+def build_visualize_html(land_df, ocean_df, initial_filters=None):
+    html = Path('visualize.html').read_text(encoding='utf-8')
+    station_js = Path('station_points.js').read_text(encoding='utf-8')
+
+    land_rows = land_df.fillna('').to_dict(orient='records')
+    ocean_rows = ocean_df.fillna('').to_dict(orient='records')
+    initial_filters = initial_filters or {}
+
+    init_script = (
+        '<script>\n'
+        f'window.INITIAL_DATA = {json.dumps({"land": land_rows, "ocean": ocean_rows})};\n'
+        f'window.INITIAL_MAP_FILTERS = {json.dumps(initial_filters)};\n'
+        '</script>\n'
+    )
+
+    html = html.replace(
+        '<script src="./station_points.js"></script>',
+        f'<script>\n{station_js}\n</script>\n{init_script}'
+    )
+
+    html = html.replace(
+        '''        async function loadClusterData(filePath, type) {
+            var res = await fetch(filePath);
+            if (!res.ok) {
+                throw new Error('Không đọc được file ' + filePath);
+            }
+            var csvText = await res.text();
+            var rows = csvToObjects(csvText);
+            return normalizeClusterRows(rows, type);
+        }''',
+        '''        async function loadClusterData(filePath, type) {
+            if (window.INITIAL_DATA && window.INITIAL_DATA[type]) {
+                return normalizeClusterRows(window.INITIAL_DATA[type], type);
+            }
+            var res = await fetch(filePath);
+            if (!res.ok) {
+                throw new Error('Không đọc được file ' + filePath);
+            }
+            var csvText = await res.text();
+            var rows = csvToObjects(csvText);
+            return normalizeClusterRows(rows, type);
+        }'''
+    )
+
+    return html
+
+
+def show_visualize_tab(land_df, ocean_df):
+    st.header('Bản đồ trạm')
+    st.write('Nhúng bản đồ `visualize.html` và hỗ trợ xem toàn bộ hoặc lọc theo loại trạm / theo trạm cụ thể.')
+
+    mode = st.radio(
+        'Chọn chế độ bản đồ:',
+        ('Tất cả', 'Theo loại trạm', 'Theo trạm'),
+        horizontal=True
+    )
+
+    initial_filters = {}
+    if mode == 'Theo loại trạm':
+        region = st.selectbox(
+            'Chọn khu vực:',
+            ('land', 'ocean'),
+            format_func=lambda x: 'Đất liền' if x == 'land' else 'Đại dương'
+        )
+        initial_filters['dataset'] = region
+    elif mode == 'Theo trạm':
+        station_ids = sorted(set(
+            land_df['MonitoringLocationIdentifier'].astype(str).tolist() +
+            ocean_df['MonitoringLocationIdentifier'].astype(str).tolist()
+        ))
+        selected_station = st.selectbox('Chọn trạm:', station_ids)
+        initial_filters['stationIds'] = [str(selected_station)]
+
+    html = build_visualize_html(land_df, ocean_df, initial_filters=initial_filters)
+    components.html(html, height=780, scrolling=True)
 
 
 def get_indicator_columns(data):
@@ -127,7 +207,7 @@ def make_histogram_grid(df, indicators):
     row, col = 1, 1
     for idx, indicator in enumerate(indicators):
         fig.add_trace(
-            go.Histogram(x=df[indicator], name=indicator, marker_color='#1f77b4', nbinsx=40),
+            go.Histogram(x=df[indicator], name=indicator, marker_color='#1f77b4', nbinsx=100),
             row=row,
             col=col
         )
@@ -201,8 +281,9 @@ def show_seasonal_boxplot(data, indicator):
     cols[1].plotly_chart(season_fig, use_container_width=True)
 
 
-def show_overview(data, meta, title):
-    st.header(title)
+def show_overview(data, meta, title, key_suffix=None):
+    if title:
+        st.header(title)
     st.write("**Tổng quan dữ liệu**")
     indicators = get_indicator_columns(data)
     st.markdown(f"- Số hàng: **{len(data):,}**")
@@ -245,7 +326,8 @@ def show_overview(data, meta, title):
         st.plotly_chart(hist_fig, use_container_width=True)
 
     if 'month' in data.columns and len(indicators) > 0:
-        seasonal_choice = st.selectbox("Chọn chỉ số seasonal", indicators, index=0, key=f"seasonal_{title}")
+        seasonal_key = f"seasonal_{key_suffix or title or 'overview'}"
+        seasonal_choice = st.selectbox("Chọn chỉ số seasonal", indicators, index=0, key=seasonal_key)
         show_seasonal_boxplot(data, seasonal_choice)
 
 def show_station_details(data, meta, title):
@@ -291,6 +373,7 @@ def main():
     st.title("Water Quality Dashboard")
     st.write("Dashboard này hiển thị phân tích tổng quan và chi tiết trên dữ liệu nước mặt và dữ liệu biển.")
 
+    # Select dataset
     dataset_type = st.sidebar.radio(
         "Chọn bộ dữ liệu",
         ('Dữ liệu nước mặt', 'Dữ liệu biển')
@@ -298,14 +381,103 @@ def main():
 
     if dataset_type == 'Dữ liệu nước mặt':
         data = prepare_data(df_land)
-        show_overview(data, df_meta, "Tổng quan dữ liệu nước mặt")
-        show_station_details(data, df_meta, "Dữ liệu nước mặt")
+        title_prefix = "Dữ liệu nước mặt"
     else:
         data = prepare_data(df_ocean, zero_values={'< DL': 0})
-        show_overview(data, df_meta, "Tổng quan dữ liệu biển")
-        show_station_details(data, df_meta, "Dữ liệu biển")
+        title_prefix = "Dữ liệu biển"
 
     st.sidebar.markdown("---")
+
+    # Create tabs: Overview and Details
+    tab1, tab2 = st.tabs(["Tổng quan", "Chi tiết"])
+
+    with tab1:
+        st.header(f"Tổng quan - {title_prefix}")
+        show_overview(data, df_meta, "", key_suffix=title_prefix)
+
+    with tab2:
+        st.header(f"Chi tiết - {title_prefix}")
+        detail_mode = st.radio(
+            "Chọn chế độ xem chi tiết:",
+            ('Xem theo khu vực', 'Xem theo trạm'),
+            horizontal=True
+        )
+        
+        if detail_mode == 'Xem theo khu vực':
+            st.subheader("Lọc theo khu vực")
+            
+            if 'MonitoringLocationTypeName' in df_meta.columns:
+                location_types = sorted(df_meta['MonitoringLocationTypeName'].dropna().unique().tolist())
+                selected_types = st.multiselect(
+                    "Chọn khu vực:",
+                    options=location_types,
+                    default=[location_types[0]] if location_types else []
+                )
+                
+                if selected_types:
+                    # Filter metadata for selected location types
+                    filtered_meta = df_meta[df_meta['MonitoringLocationTypeName'].isin(selected_types)]
+                    filtered_station_ids = filtered_meta['MonitoringLocationIdentifier'].unique()
+                    
+                    # Filter main data
+                    data_filtered = data[data['MonitoringLocationIdentifier'].isin(filtered_station_ids)].copy()
+                    
+                    st.write(f"**Khu vực đã chọn:** {', '.join(selected_types)}")
+                    st.write(f"**Số trạm:** {len(filtered_station_ids)}")
+                    st.write("---")
+                    
+                    show_overview(data_filtered, filtered_meta, "", key_suffix=', '.join(selected_types))
+                else:
+                    st.warning("Vui lòng chọn ít nhất một khu vực")
+            else:
+                st.warning("Không tìm thấy cột 'MonitoringLocationTypeName' trong metadata")
+        
+        else:  # Xem theo trạm
+            st.subheader("Chọn trạm cụ thể")
+            
+            # Get stations from filtered data
+            station_ids = sorted(data['MonitoringLocationIdentifier'].unique())
+            if station_ids:
+                selected_station = st.selectbox(
+                    "Chọn trạm:",
+                    options=station_ids
+                )
+                
+                # Filter data for selected station
+                station_data = data[data['MonitoringLocationIdentifier'] == selected_station].copy()
+                station_meta = df_meta[df_meta['MonitoringLocationIdentifier'] == selected_station]
+                
+                if not station_data.empty:
+                    # Display station info
+                    st.write("**Thông tin trạm**")
+                    cols_to_show = ['MonitoringLocationIdentifier', 'MonitoringLocationName', 'MonitoringLocationType', 'MonitoringLocationTypeName']
+                    display_meta = station_meta[[col for col in cols_to_show if col in station_meta.columns]].reset_index(drop=True)
+                    st.dataframe(display_meta)
+                    
+                    st.write("---")
+                    
+                    # Get indicators and display
+                    indicators = get_indicator_columns(station_data)
+                    st.write(f"**Số bản ghi trạm:** {len(station_data):,}")
+                    
+                    st.write("### Xu hướng theo thời gian")
+                    trend_fig = make_trend_subplots(station_data, indicators)
+                    if trend_fig:
+                        st.plotly_chart(trend_fig, use_container_width=True)
+
+                    st.write("### Boxplot và histogram trạm")
+                    if len(indicators) > 0:
+                        box_fig = make_boxplot_grid(station_data[indicators].dropna(), indicators)
+                        if box_fig:
+                            st.plotly_chart(box_fig, use_container_width=True)
+
+                        hist_fig = make_histogram_grid(station_data[indicators].dropna(), indicators)
+                        if hist_fig:
+                            st.plotly_chart(hist_fig, use_container_width=True)
+                else:
+                    st.warning("Không có dữ liệu cho trạm này")
+            else:
+                st.warning("Không có trạm nào trong dữ liệu")
 
 
 if __name__ == '__main__':

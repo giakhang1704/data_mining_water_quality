@@ -198,7 +198,7 @@
                         stationId: String(row.MonitoringLocationIdentifier),
                         year: Number.isFinite(yearFromDate) ? yearFromDate : null,
                         month: Number.isFinite(month) ? month : null,
-                        cluster: Number(row.cluster_agglomerative_3),
+                        cluster: Number(row.cluster_kmeans_3),
                         CODMn: type === 'land' ? (Number.isFinite(Number(row.CODMn)) ? Number(row.CODMn) : null) : null,
                         DO: Number.isFinite(Number(row.DO)) ? Number(row.DO) : null,
                         NH4N: type === 'land' ? (Number.isFinite(Number(row.NH4N)) ? Number(row.NH4N) : null) : null,
@@ -465,7 +465,7 @@
         }
 
         function toTypeLabel(type) {
-            return type === 'land' ? 'Đất liền (Weekly)' : 'Đại dương (Monthly)';
+            return type === 'land' ? 'Đất liền' : 'Đại dương';
         }
 
         async function loadStations() {
@@ -484,7 +484,7 @@
                 fillLocationOptions(stations);
 
                 L.control.layers({
-                    'Esri Street (ít bị chặn)': esriStreet,
+                    'Esri Street': esriStreet,
                     'Carto Light': cartoLight,
                     'OpenStreetMap': osm
                 }, {

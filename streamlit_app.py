@@ -1,6 +1,4 @@
-import json
-from pathlib import Path
-
+import math
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -8,12 +6,18 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+# ==========================================
+# 1. CẤU HÌNH GIAO DIỆN (KHÔNG ICON)
+# ==========================================
 st.set_page_config(
-    page_title="Water Quality Dashboard",
-    page_icon="🌊",
-    layout="wide"
+    page_title="Water Quality Analysis System",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
+# ==========================================
+# 2. DATA PROCESSING
+# ==========================================
 @st.cache_data
 def load_data():
     df_land = pd.read_csv('dataset/WaterQuality_Clustered_Results.csv', low_memory=False)
@@ -26,7 +30,6 @@ def load_data():
 
     return df_land, df_ocean, df_meta
 
-
 def prepare_data(df, zero_values=None):
     data = df.copy()
     if 'IndicatorsName' in data.columns and 'Value' in data.columns:
@@ -34,17 +37,18 @@ def prepare_data(df, zero_values=None):
             data['Value'] = data['Value'].replace(zero_values)
         data['Value'] = pd.to_numeric(data['Value'], errors='coerce')
         data = (
-            data
-            .pivot_table(
+            data.pivot_table(
                 index=['MonitoringLocationIdentifier', 'MonitoringDate'],
                 columns='IndicatorsName',
                 values='Value',
                 aggfunc='mean'
-            )
-            .reset_index()
+            ).reset_index()
         )
+    
+    # Xử lý thời gian và tạo cột YearMonth để lọc
     data['MonitoringDate'] = pd.to_datetime(data['MonitoringDate'], format='mixed', dayfirst=True, errors='coerce')
     if 'MonitoringDate' in data.columns:
+        data['YearMonth'] = data['MonitoringDate'].dt.strftime('%Y-%m') # Cột để lọc theo tháng
         data['month'] = data['MonitoringDate'].dt.month
         data['season'] = data['month'].map({
             12: 'Winter', 1: 'Winter', 2: 'Winter',
@@ -55,430 +59,354 @@ def prepare_data(df, zero_values=None):
     data = data.sort_values(['MonitoringLocationIdentifier', 'MonitoringDate']).reset_index(drop=True)
     return data
 
-
-def build_visualize_html(land_df, ocean_df, initial_filters=None):
-    html = Path('visualize.html').read_text(encoding='utf-8')
-    station_js = Path('station_points.js').read_text(encoding='utf-8')
-
-    land_rows = land_df.fillna('').to_dict(orient='records')
-    ocean_rows = ocean_df.fillna('').to_dict(orient='records')
-    initial_filters = initial_filters or {}
-
-    init_script = (
-        '<script>\n'
-        f'window.INITIAL_DATA = {json.dumps({"land": land_rows, "ocean": ocean_rows})};\n'
-        f'window.INITIAL_MAP_FILTERS = {json.dumps(initial_filters)};\n'
-        '</script>\n'
-    )
-
-    html = html.replace(
-        '<script src="./station_points.js"></script>',
-        f'<script>\n{station_js}\n</script>\n{init_script}'
-    )
-
-    html = html.replace(
-        '''        async function loadClusterData(filePath, type) {
-            var res = await fetch(filePath);
-            if (!res.ok) {
-                throw new Error('Không đọc được file ' + filePath);
-            }
-            var csvText = await res.text();
-            var rows = csvToObjects(csvText);
-            return normalizeClusterRows(rows, type);
-        }''',
-        '''        async function loadClusterData(filePath, type) {
-            if (window.INITIAL_DATA && window.INITIAL_DATA[type]) {
-                return normalizeClusterRows(window.INITIAL_DATA[type], type);
-            }
-            var res = await fetch(filePath);
-            if (!res.ok) {
-                throw new Error('Không đọc được file ' + filePath);
-            }
-            var csvText = await res.text();
-            var rows = csvToObjects(csvText);
-            return normalizeClusterRows(rows, type);
-        }'''
-    )
-
-    return html
-
-
-def show_visualize_tab(land_df, ocean_df):
-    st.header('Bản đồ trạm')
-    st.write('Nhúng bản đồ `visualize.html` và hỗ trợ xem toàn bộ hoặc lọc theo loại trạm / theo trạm cụ thể.')
-
-    mode = st.radio(
-        'Chọn chế độ bản đồ:',
-        ('Tất cả', 'Theo loại trạm', 'Theo trạm'),
-        horizontal=True
-    )
-
-    initial_filters = {}
-    if mode == 'Theo loại trạm':
-        region = st.selectbox(
-            'Chọn khu vực:',
-            ('land', 'ocean'),
-            format_func=lambda x: 'Đất liền' if x == 'land' else 'Đại dương'
-        )
-        initial_filters['dataset'] = region
-    elif mode == 'Theo trạm':
-        station_ids = sorted(set(
-            land_df['MonitoringLocationIdentifier'].astype(str).tolist() +
-            ocean_df['MonitoringLocationIdentifier'].astype(str).tolist()
-        ))
-        selected_station = st.selectbox('Chọn trạm:', station_ids)
-        initial_filters['stationIds'] = [str(selected_station)]
-
-    html = build_visualize_html(land_df, ocean_df, initial_filters=initial_filters)
-    components.html(html, height=780, scrolling=True)
-
-
 def get_indicator_columns(data):
-    exclude_cols = {'MonitoringLocationIdentifier', 'MonitoringDate', 'month'}
+    exclude_cols = {'MonitoringLocationIdentifier', 'MonitoringDate', 'month', 'YearMonth', 'season'}
     return [col for col in data.columns if col not in exclude_cols and pd.api.types.is_numeric_dtype(data[col]) and not str(col).startswith('cluster_')]
 
-
+# ==========================================
+# 3. HÀM VẼ BIỂU ĐỒ (PLOTLY)
+# ==========================================
 def get_subplot_layout(n):
-    """Calculate rows and cols for balanced subplot layout"""
-    if n <= 0:
-        return 1, 1
-    if n == 1:
-        return 1, 1
-    if n == 2:
-        return 1, 2
-    if n <= 6:
-        rows = 2
-        cols = (n + 1) // 2  # ceil(n/2): 3→2, 4→2, 5→3, 6→3
-        return rows, cols
-    # Cho n > 6
+    if n <= 0: return 1, 1
+    if n <= 2: return 1, n
+    if n <= 6: return 2, math.ceil(n/2)
     nrows = int(np.ceil(np.sqrt(n)))
     ncols = int(np.ceil(n / nrows))
     return nrows, ncols
 
-
 def make_trend_subplots(data, indicators):
-    """Create subplots for time trends of each indicator"""
-    if not indicators or data.empty:
-        return None
-    
+    if not indicators or data.empty: return None
     nrows, ncols = get_subplot_layout(len(indicators))
-    fig = make_subplots(
-        rows=nrows,
-        cols=ncols,
-        subplot_titles=indicators,
-        specs=[[{'secondary_y': False}] * ncols for _ in range(nrows)]
-    )
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=indicators)
     
     row, col = 1, 1
-    for idx, indicator in enumerate(indicators):
+    for indicator in indicators:
         subset = data.dropna(subset=[indicator])
         if not subset.empty:
-            # Group by date and calculate mean
             trend = subset.groupby('MonitoringDate')[indicator].mean().reset_index()
             fig.add_trace(
-                go.Scatter(
-                    x=trend['MonitoringDate'],
-                    y=trend[indicator],
-                    mode='lines',
-                    name=indicator,
-                    line=dict(width=2)
-                ),
-                row=row,
-                col=col
+                go.Scatter(x=trend['MonitoringDate'], y=trend[indicator], mode='lines', name=indicator, line=dict(width=2)),
+                row=row, col=col
             )
+        col += 1
+        if col > ncols:
+            col, row = 1, row + 1
+            
+    fig.update_layout(height=300 * nrows, showlegend=False, margin=dict(t=40, b=20, l=20, r=20))
+    return fig
+
+def make_distribution_plots(df, indicators, plot_type='histogram'):
+    if not indicators or df.empty: return None
+    nrows, ncols = get_subplot_layout(len(indicators))
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=indicators)
+    
+    row, col = 1, 1
+    for indicator in indicators:
+        if plot_type == 'histogram':
+            fig.add_trace(go.Histogram(x=df[indicator], marker_color='#1f77b4', nbinsx=50), row=row, col=col)
+        else:
+            fig.add_trace(go.Box(y=df[indicator], marker_color='#ff7f0e'), row=row, col=col)
         
         col += 1
         if col > ncols:
-            col = 1
-            row += 1
-    
-    fig.update_layout(height=300 * nrows, showlegend=False, title_text='Xu hướng theo thời gian')
+            col, row = 1, row + 1
+            
+    fig.update_layout(height=300 * nrows, showlegend=False, margin=dict(t=40, b=20, l=20, r=20))
     return fig
 
-
-def make_histogram_grid(df, indicators):
-    """Create histogram subplots with balanced layout"""
-    if not indicators or df.empty:
+def make_correlation_heatmap(data, indicators):
+    """TÍNH NĂNG MỚI: Biểu đồ Heatmap thể hiện Ma trận tương quan"""
+    if len(indicators) < 2 or data.empty: 
         return None
-    
-    nrows, ncols = get_subplot_layout(len(indicators))
-    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=indicators)
-    
-    row, col = 1, 1
-    for idx, indicator in enumerate(indicators):
-        fig.add_trace(
-            go.Histogram(x=df[indicator], name=indicator, marker_color='#1f77b4', nbinsx=100),
-            row=row,
-            col=col
-        )
-        col += 1
-        if col > ncols:
-            col = 1
-            row += 1
-    
-    fig.update_layout(height=300 * nrows, showlegend=False, title_text='Phân phối các chỉ số')
+    corr_matrix = data[indicators].corr()
+    fig = px.imshow(
+        corr_matrix, 
+        text_auto=".2f", 
+        aspect="auto", 
+        color_continuous_scale="RdBu_r", 
+        zmin=-1, zmax=1
+    )
+    fig.update_layout(height=450, margin=dict(t=20, b=20, l=20, r=20))
     return fig
-
-
-def make_boxplot_grid(df, indicators):
-    """Create boxplot subplots with balanced layout"""
-    if not indicators or df.empty:
-        return None
-    
-    nrows, ncols = get_subplot_layout(len(indicators))
-    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=indicators)
-    
-    row, col = 1, 1
-    for idx, indicator in enumerate(indicators):
-        fig.add_trace(
-            go.Box(y=df[indicator], name=indicator),
-            row=row,
-            col=col
-        )
-        col += 1
-        if col > ncols:
-            col = 1
-            row += 1
-    
-    fig.update_layout(height=400 * nrows, showlegend=False, title_text='Boxplot các chỉ số')
-    return fig
-
-
-def get_cluster_columns(data):
-    return [col for col in data.columns if str(col).startswith('cluster_') and pd.api.types.is_numeric_dtype(data[col])]
-
 
 def show_seasonal_boxplot(data, indicator):
-    if 'month' not in data.columns or 'season' not in data.columns:
-        return
-
+    if 'month' not in data.columns or 'season' not in data.columns: return
     subset = data.dropna(subset=[indicator, 'month', 'season'])
-    if subset.empty:
-        return
+    if subset.empty: return
 
-    cols = st.columns(2)
-    month_fig = px.box(
-        subset,
-        x='month',
-        y=indicator,
-        points='outliers',
-        title=f'{indicator} theo tháng',
-        labels={'month': 'Tháng', indicator: 'Giá trị'}
+    col1, col2 = st.columns(2)
+    with col1:
+        month_fig = px.box(subset, x='month', y=indicator, points='outliers', title=f'{indicator} distribution by Month')
+        st.plotly_chart(month_fig, use_container_width=True)
+    with col2:
+        season_fig = px.box(subset, x='season', y=indicator, points='outliers', category_orders={'season': ['Winter', 'Spring', 'Summer', 'Autumn']}, title=f'{indicator} distribution by Season')
+        st.plotly_chart(season_fig, use_container_width=True)
+
+def show_target_analysis(data, indicators, cluster_col='cluster_kmeans_3'):
+    if len(indicators) < 2: return
+    
+    st.markdown("Select a **Target Indicator** to deeply analyze how other variables influence it:")
+    target_var = st.selectbox("Target Variable:", indicators, index=indicators.index('DO') if 'DO' in indicators else 0)
+
+    # Tính toán ma trận tương quan
+    corr_matrix = data[indicators].corr()
+    target_corr = corr_matrix[[target_var]].drop(target_var).sort_values(by=target_var, ascending=True)
+
+    col_bar, col_scatter = st.columns([1, 2])
+    
+    with col_bar:
+        st.markdown(f"**Correlation Coefficient with {target_var}**")
+        fig_corr = px.bar(
+            target_corr, x=target_var, y=target_corr.index, orientation='h',
+            color=target_var, color_continuous_scale='RdBu', range_color=[-1, 1],
+            labels={target_var: 'Pearson Correlation', 'index': 'Indicator'}
+        )
+        fig_corr.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=350)
+        st.plotly_chart(fig_corr, use_container_width=True)
+
+    with col_scatter:
+        st.markdown(f"**Scatter Matrix Analysis (Impact on {target_var})**")
+        other_vars = [v for v in indicators if v != target_var]
+        nrows = math.ceil(len(other_vars) / 2)
+        fig_scatter = make_subplots(rows=nrows, cols=2, subplot_titles=[f"{v} vs {target_var}" for v in other_vars])
+
+        row, col = 1, 1
+        color_map = {'0': '#28a745', '1': '#ffc107', '2': '#dc3545'}
+        for var in other_vars:
+            if cluster_col in data.columns:
+                for c_val, c_color in color_map.items():
+                    subset = data[data[cluster_col].astype(str) == c_val]
+                    fig_scatter.add_trace(go.Scatter(x=subset[var], y=subset[target_var], mode='markers', marker=dict(color=c_color, opacity=0.5, size=4), name=f"Cluster {c_val}", showlegend=(row==1 and col==1)), row=row, col=col)
+            else:
+                fig_scatter.add_trace(go.Scatter(x=data[var], y=data[target_var], mode='markers', marker=dict(color='#1f77b4', opacity=0.5, size=4)), row=row, col=col)
+
+            fig_scatter.update_xaxes(title_text=var, row=row, col=col)
+            fig_scatter.update_yaxes(title_text=target_var, row=row, col=col)
+
+            col += 1
+            if col > 2: col, row = 1, row + 1
+
+        fig_scatter.update_layout(height=350 * nrows, margin=dict(l=0, r=0, t=30, b=0))
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+# ==========================================
+# 4. INTERACTIVE MAP (NATIVE PLOTLY)
+# ==========================================
+def render_interactive_map(df_data, df_meta):
+    meta_coords = df_meta[[
+        'MonitoringLocationIdentifier',
+        'MonitoringLocationName',
+        'LatitudeMeasure_WGS84',
+        'LongitudeMeasure_WGS84'
+    ]].drop_duplicates()
+    
+    meta_coords = meta_coords.rename(
+        columns={
+            'LatitudeMeasure_WGS84': 'lat',
+            'LongitudeMeasure_WGS84': 'lon',
+            'MonitoringLocationName': 'StationName'
+        }
     )
-    month_fig.update_layout(height=420)
-    cols[0].plotly_chart(month_fig, use_container_width=True)
 
-    season_fig = px.box(
-        subset,
-        x='season',
-        y=indicator,
-        points='outliers',
-        category_orders={'season': ['Winter', 'Spring', 'Summer', 'Autumn']},
-        title=f'{indicator} theo mùa',
-        labels={'season': 'Mùa', indicator: 'Giá trị'}
+    cluster_col = 'cluster_kmeans_3'
+    
+    if cluster_col not in df_data.columns:
+        st.warning(f"Column '{cluster_col}' not found. Map will display without cluster colors.")
+        cluster_col = None
+
+    df_map = df_data.sort_values('MonitoringDate').drop_duplicates(subset=['MonitoringLocationIdentifier'], keep='last')
+    
+    df_map = df_map[['MonitoringLocationIdentifier'] + ([cluster_col] if cluster_col else [])]
+    df_map = df_map.merge(meta_coords, on='MonitoringLocationIdentifier', how='inner')
+
+    if df_map.empty or 'lat' not in df_map.columns or 'lon' not in df_map.columns:
+        st.warning("Current dataset does not contain station coordinates.")
+        return None
+
+    if cluster_col:
+        df_map[cluster_col] = df_map[cluster_col].astype(str)
+
+    color_map = {
+        '0': '#28a745', # Xanh lá (Green)
+        '1': '#ffc107', # Vàng (Yellow)
+        '2': '#dc3545'  # Đỏ (Red)
+    }
+
+    fig = px.scatter_mapbox(
+        df_map,
+        lat='lat',
+        lon='lon',
+        hover_name='StationName',
+        hover_data={'MonitoringLocationIdentifier': True, cluster_col: True} if cluster_col else {'MonitoringLocationIdentifier': True},
+        color=cluster_col if cluster_col else None,
+        color_discrete_map=color_map,
+        zoom=4,
+        height=500,
     )
-    season_fig.update_layout(height=420)
-    cols[1].plotly_chart(season_fig, use_container_width=True)
 
+    fig.update_layout(mapbox_style='carto-positron', margin={'r':0,'t':0,'l':0,'b':0})
 
-def show_overview(data, meta, title, key_suffix=None):
-    if title:
-        st.header(title)
-    st.write("**Tổng quan dữ liệu**")
-    indicators = get_indicator_columns(data)
-    st.markdown(f"- Số hàng: **{len(data):,}**")
-    st.markdown(f"- Số trạm đo: **{data['MonitoringLocationIdentifier'].nunique():,}**")
-    st.markdown(f"- Số chỉ số: **{len(indicators)}**")
-    st.write("---")
+    map_event = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
 
-    with st.expander("Xem bảng dữ liệu đầu tiên", expanded=False):
-        st.dataframe(data.head(20))
+    selected_station = None
+    if map_event and len(map_event.selection['points']) > 0:
+        selected_station = map_event.selection['points'][0]['customdata'][0]
+        
+    return selected_station
 
-    if len(indicators) == 0:
-        st.warning("Không tìm thấy chỉ số số trong dữ liệu để vẽ biểu đồ.")
-        return
-
-    cols = st.columns(2)
-    cols[0].metric("Chỉ số", len(indicators))
-    cols[1].metric("Trạm", f"{data['MonitoringLocationIdentifier'].nunique():,}")
-
-    st.write("### Ma trận tương quan")
-    corr = data[indicators].corr()
-    corr_fig = px.imshow(
-        corr,
-        text_auto=True,
-        aspect='auto',
-        color_continuous_scale='RdBu_r',
-        zmin=-1,
-        zmax=1,
-        title='Ma trận tương quan giữa các chỉ số'
-    )
-    st.plotly_chart(corr_fig, use_container_width=True)
-
-    st.write("### Boxplot các chỉ số")
-    box_fig = make_boxplot_grid(data[indicators].dropna(), indicators)
-    if box_fig:
-        st.plotly_chart(box_fig, use_container_width=True)
-
-    st.write("### Histogram và phân phối")
-    hist_fig = make_histogram_grid(data[indicators].dropna(), indicators)
-    if hist_fig:
-        st.plotly_chart(hist_fig, use_container_width=True)
-
-    if 'month' in data.columns and len(indicators) > 0:
-        seasonal_key = f"seasonal_{key_suffix or title or 'overview'}"
-        seasonal_choice = st.selectbox("Chọn chỉ số seasonal", indicators, index=0, key=seasonal_key)
-        show_seasonal_boxplot(data, seasonal_choice)
-
-def show_station_details(data, meta, title):
-    st.header(f"Chi tiết trạm: {title}")
-    station_ids = data['MonitoringLocationIdentifier'].unique()
-    station_id = st.selectbox("Chọn mã trạm", station_ids)
-    station_data = data[data['MonitoringLocationIdentifier'] == station_id].copy()
-
-    if station_data.empty:
-        st.warning("Không có dữ liệu cho trạm này.")
-        return
-
-    station_meta = meta[meta['MonitoringLocationIdentifier'] == station_id]
-    if not station_meta.empty:
-        st.write("**Thông tin trạm**")
-        # Chỉ hiển thị 4 cột chỉ đị
-        cols_to_show = ['MonitoringLocationIdentifier', 'MonitoringLocationName', 'MonitoringLocationType', 'MonitoringLocationTypeName']
-        display_meta = station_meta[[col for col in cols_to_show if col in station_meta.columns]].reset_index(drop=True)
-        st.dataframe(display_meta)
-
-    indicators = get_indicator_columns(station_data)
-    st.write(f"**Số bản ghi trạm:** {len(station_data):,}")
-    st.write("---")
-
-    st.write("### Xu hướng theo thời gian")
-    trend_fig = make_trend_subplots(station_data, indicators)
-    if trend_fig:
-        st.plotly_chart(trend_fig, use_container_width=True)
-
-    st.write("### Boxplot và histogram trạm")
-    if len(indicators) > 0:
-        box_fig = make_boxplot_grid(station_data[indicators].dropna(), indicators)
-        if box_fig:
-            st.plotly_chart(box_fig, use_container_width=True)
-
-        hist_fig = make_histogram_grid(station_data[indicators].dropna(), indicators)
-        if hist_fig:
-            st.plotly_chart(hist_fig, use_container_width=True)
-
-
+# ==========================================
+# 5. MAIN APP
+# ==========================================
 def main():
     df_land, df_ocean, df_meta = load_data()
-    st.title("Water Quality Dashboard")
-    st.write("Dashboard này hiển thị phân tích tổng quan và chi tiết trên dữ liệu nước mặt và dữ liệu biển.")
-
-    # Select dataset
+    
+    # SIDEBAR
+    st.sidebar.title("Dashboard Options")
+    st.sidebar.markdown("---")
+    
     dataset_type = st.sidebar.radio(
-        "Chọn bộ dữ liệu",
-        ('Dữ liệu nước mặt', 'Dữ liệu biển')
+        "Monitoring environment:",
+        ('Surface water data', 'Ocean data')
     )
-
-    if dataset_type == 'Dữ liệu nước mặt':
+    
+    if dataset_type == 'Surface water data':
         data = prepare_data(df_land)
-        title_prefix = "Dữ liệu nước mặt"
+        title_prefix = "Surface water"
     else:
         data = prepare_data(df_ocean, zero_values={'< DL': 0})
-        title_prefix = "Dữ liệu biển"
+        title_prefix = "Ocean water"
 
     st.sidebar.markdown("---")
+    view_mode = st.sidebar.radio(
+        "Spatial scope:",
+        ('System-wide', 'By region')
+    )
 
-    # Create tabs: Overview and Details
-    tab1, tab2 = st.tabs(["Tổng quan", "Chi tiết"])
+    filtered_data = data.copy()
+    current_meta = df_meta.copy()
 
-    with tab1:
-        st.header(f"Tổng quan - {title_prefix}")
-        show_overview(data, df_meta, "", key_suffix=title_prefix)
+    if view_mode == 'By region':
+        if 'MonitoringLocationTypeName' in df_meta.columns:
+            location_types = sorted(df_meta['MonitoringLocationTypeName'].dropna().unique().tolist())
+            selected_types = st.sidebar.multiselect("Select location types:", options=location_types)
+            if selected_types:
+                current_meta = df_meta[df_meta['MonitoringLocationTypeName'].isin(selected_types)]
+                filtered_station_ids = current_meta['MonitoringLocationIdentifier'].unique()
+                filtered_data = filtered_data[filtered_data['MonitoringLocationIdentifier'].isin(filtered_station_ids)].copy()
+            else:
+                filtered_data = pd.DataFrame()
 
-    with tab2:
-        st.header(f"Chi tiết - {title_prefix}")
-        detail_mode = st.radio(
-            "Chọn chế độ xem chi tiết:",
-            ('Xem theo khu vực', 'Xem theo trạm'),
-            horizontal=True
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Time Filter (Timeline)**")
+    if not filtered_data.empty and 'YearMonth' in filtered_data.columns:
+        available_months = sorted(filtered_data['YearMonth'].dropna().unique().tolist())
+        options = ["All time"] + available_months
+        
+        selected_month = st.sidebar.select_slider(
+            "Slide to view historical data:", 
+            options=options,
+            value="All time"
         )
         
-        if detail_mode == 'Xem theo khu vực':
-            st.subheader("Lọc theo khu vực")
-            
-            if 'MonitoringLocationTypeName' in df_meta.columns:
-                location_types = sorted(df_meta['MonitoringLocationTypeName'].dropna().unique().tolist())
-                selected_types = st.multiselect(
-                    "Chọn khu vực:",
-                    options=location_types,
-                    default=[location_types[0]] if location_types else []
-                )
-                
-                if selected_types:
-                    # Filter metadata for selected location types
-                    filtered_meta = df_meta[df_meta['MonitoringLocationTypeName'].isin(selected_types)]
-                    filtered_station_ids = filtered_meta['MonitoringLocationIdentifier'].unique()
-                    
-                    # Filter main data
-                    data_filtered = data[data['MonitoringLocationIdentifier'].isin(filtered_station_ids)].copy()
-                    
-                    st.write(f"**Khu vực đã chọn:** {', '.join(selected_types)}")
-                    st.write(f"**Số trạm:** {len(filtered_station_ids)}")
-                    st.write("---")
-                    
-                    show_overview(data_filtered, filtered_meta, "", key_suffix=', '.join(selected_types))
-                else:
-                    st.warning("Vui lòng chọn ít nhất một khu vực")
-            else:
-                st.warning("Không tìm thấy cột 'MonitoringLocationTypeName' trong metadata")
+        if selected_month != "All time":
+            filtered_data = filtered_data[filtered_data['YearMonth'] == selected_month]
+
+    # KHÔNG GIAN CHÍNH
+    st.title(f"Water Quality Analysis System - {title_prefix}")
+    
+    if filtered_data.empty:
+        st.markdown("*No data available for the selected filters.*")
+        return
+
+    st.subheader("Spatial Clustering Map")
+    if selected_month == "All time":
+        st.markdown("*Map showing the **latest** known status of each station. Use the timeline slider in the sidebar to view historical map snapshots.*")
+    else:
+        st.markdown(f"*Map showing data for **{selected_month}**.*")
         
-        else:  # Xem theo trạm
-            st.subheader("Chọn trạm cụ thể")
+    clicked_station = render_interactive_map(filtered_data, current_meta)
+    st.markdown("---")
+
+    if clicked_station:
+        st.markdown(f"**Display status:** Detailed view for station **{clicked_station}**")
+        display_data = data[data['MonitoringLocationIdentifier'] == clicked_station].copy()
+        
+        st.subheader("Station Information & Monitoring History")
+        
+        station_meta = df_meta[df_meta['MonitoringLocationIdentifier'] == clicked_station]
+        cols_to_show = ['MonitoringLocationIdentifier', 'MonitoringLocationName', 'MonitoringLocationType', 'MonitoringLocationTypeName']
+        display_meta = station_meta[[col for col in cols_to_show if col in station_meta.columns]].reset_index(drop=True)
+        
+        st.markdown("**Administrative Information:**")
+        st.dataframe(display_meta, use_container_width=True, hide_index=True)
+
+        indicators = get_indicator_columns(display_data)
+        st.markdown("**Monitoring Records (Time-series):**")
+        if not display_data.empty:
+            cluster_col = 'cluster_kmeans_3'
+            hist_cols = ['MonitoringDate'] + ([cluster_col] if cluster_col in display_data.columns else []) + indicators
             
-            # Get stations from filtered data
-            station_ids = sorted(data['MonitoringLocationIdentifier'].unique())
-            if station_ids:
-                selected_station = st.selectbox(
-                    "Chọn trạm:",
-                    options=station_ids
-                )
-                
-                # Filter data for selected station
-                station_data = data[data['MonitoringLocationIdentifier'] == selected_station].copy()
-                station_meta = df_meta[df_meta['MonitoringLocationIdentifier'] == selected_station]
-                
-                if not station_data.empty:
-                    # Display station info
-                    st.write("**Thông tin trạm**")
-                    cols_to_show = ['MonitoringLocationIdentifier', 'MonitoringLocationName', 'MonitoringLocationType', 'MonitoringLocationTypeName']
-                    display_meta = station_meta[[col for col in cols_to_show if col in station_meta.columns]].reset_index(drop=True)
-                    st.dataframe(display_meta)
-                    
-                    st.write("---")
-                    
-                    # Get indicators and display
-                    indicators = get_indicator_columns(station_data)
-                    st.write(f"**Số bản ghi trạm:** {len(station_data):,}")
-                    
-                    st.write("### Xu hướng theo thời gian")
-                    trend_fig = make_trend_subplots(station_data, indicators)
-                    if trend_fig:
-                        st.plotly_chart(trend_fig, use_container_width=True)
+            hist_df = display_data[hist_cols].sort_values('MonitoringDate', ascending=False)
+            hist_df['MonitoringDate'] = hist_df['MonitoringDate'].dt.strftime('%Y-%m-%d %H:%M')
+            
+            st.dataframe(hist_df, use_container_width=True, hide_index=True, height=250)
+            
+    else:
+        st.markdown(f"**Display status:** Aggregated data ({view_mode})")
+        display_data = filtered_data.copy()
 
-                    st.write("### Boxplot và histogram trạm")
-                    if len(indicators) > 0:
-                        box_fig = make_boxplot_grid(station_data[indicators].dropna(), indicators)
-                        if box_fig:
-                            st.plotly_chart(box_fig, use_container_width=True)
+    if display_data.empty:
+        return
 
-                        hist_fig = make_histogram_grid(station_data[indicators].dropna(), indicators)
-                        if hist_fig:
-                            st.plotly_chart(hist_fig, use_container_width=True)
-                else:
-                    st.warning("Không có dữ liệu cho trạm này")
-            else:
-                st.warning("Không có trạm nào trong dữ liệu")
+    indicators = get_indicator_columns(display_data)
 
+    st.markdown("---")
+    st.subheader("1. Overview KPIs")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Records", f"{len(display_data):,}")
+    col2.metric("Number of Stations", f"{display_data['MonitoringLocationIdentifier'].nunique():,}")
+    col3.metric("Number of Chemical Indicators", len(indicators))
+    st.markdown("---")
+
+    st.subheader("2. Time Trends")
+    trend_fig = make_trend_subplots(display_data, indicators)
+    if trend_fig:
+        st.plotly_chart(trend_fig, use_container_width=True)
+    st.markdown("---")
+
+    st.subheader("3. Statistical Distribution")
+    dist_type = st.radio(
+        "Choose plot type:",
+        ("Boxplot", "Histogram"),
+        horizontal=True
+    )
+    
+    if "Boxplot" in dist_type:
+        box_fig = make_distribution_plots(display_data, indicators, plot_type='boxplot')
+        if box_fig:
+            st.plotly_chart(box_fig, use_container_width=True)
+    else:
+        hist_fig = make_distribution_plots(display_data, indicators, plot_type='histogram')
+        if hist_fig: st.plotly_chart(hist_fig, use_container_width=True)
+    st.markdown("---")
+
+    # TÍNH NĂNG MỚI: CORRELATION HEATMAP
+    if len(indicators) > 1:
+        st.subheader("4. Correlation Heatmap")
+        st.markdown("*Overview of relationships between all chemical indicators. Dark blue indicates strong positive correlation, dark red indicates strong negative correlation.*")
+        heatmap_fig = make_correlation_heatmap(display_data, indicators)
+        if heatmap_fig:
+            st.plotly_chart(heatmap_fig, use_container_width=True)
+        st.markdown("---")
+
+    if 'month' in display_data.columns and len(indicators) > 0:
+        st.subheader("5. Seasonal Analysis")
+        seasonal_choice = st.selectbox("Choose indicator:", indicators)
+        show_seasonal_boxplot(display_data, seasonal_choice)
+
+    st.markdown("---")
+    st.subheader("6. Diagnostic Analysis")
+    show_target_analysis(display_data, indicators, 'cluster_kmeans_3')
 
 if __name__ == '__main__':
     main()

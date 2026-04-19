@@ -6,18 +6,13 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-# ==========================================
-# 1. CẤU HÌNH GIAO DIỆN (KHÔNG ICON)
-# ==========================================
 st.set_page_config(
     page_title="Water Quality Analysis System",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ==========================================
-# 2. DATA PROCESSING
-# ==========================================
+# Load data with caching to prevent redundant I/O operations on app rerun
 @st.cache_data
 def load_data():
     df_land = pd.read_csv('dataset/WaterQuality_Clustered_Results.csv', low_memory=False)
@@ -32,6 +27,8 @@ def load_data():
 
 def prepare_data(df, zero_values=None):
     data = df.copy()
+    
+    # Pivot dataset from long to wide format to align indicators as features for modeling/visualization
     if 'IndicatorsName' in data.columns and 'Value' in data.columns:
         if zero_values is not None:
             data['Value'] = data['Value'].replace(zero_values)
@@ -45,10 +42,11 @@ def prepare_data(df, zero_values=None):
             ).reset_index()
         )
     
-    # Xử lý thời gian và tạo cột YearMonth để lọc
     data['MonitoringDate'] = pd.to_datetime(data['MonitoringDate'], format='mixed', dayfirst=True, errors='coerce')
+    
+    # Extract temporal features for seasonal trend analysis
     if 'MonitoringDate' in data.columns:
-        data['YearMonth'] = data['MonitoringDate'].dt.strftime('%Y-%m') # Cột để lọc theo tháng
+        data['YearMonth'] = data['MonitoringDate'].dt.strftime('%Y-%m') 
         data['month'] = data['MonitoringDate'].dt.month
         data['season'] = data['month'].map({
             12: 'Winter', 1: 'Winter', 2: 'Winter',
@@ -56,23 +54,19 @@ def prepare_data(df, zero_values=None):
             6: 'Summer', 7: 'Summer', 8: 'Summer',
             9: 'Autumn', 10: 'Autumn', 11: 'Autumn'
         })
-    data = data.sort_values(['MonitoringLocationIdentifier', 'MonitoringDate']).reset_index(drop=True)
-    return data
+    return data.sort_values(['MonitoringLocationIdentifier', 'MonitoringDate']).reset_index(drop=True)
 
 def get_indicator_columns(data):
     exclude_cols = {'MonitoringLocationIdentifier', 'MonitoringDate', 'month', 'YearMonth', 'season'}
     return [col for col in data.columns if col not in exclude_cols and pd.api.types.is_numeric_dtype(data[col]) and not str(col).startswith('cluster_')]
 
-# ==========================================
-# 3. HÀM VẼ BIỂU ĐỒ (PLOTLY)
-# ==========================================
+# Calculate optimal grid dimensions for subplots based on total items
 def get_subplot_layout(n):
     if n <= 0: return 1, 1
     if n <= 2: return 1, n
     if n <= 6: return 2, math.ceil(n/2)
     nrows = int(np.ceil(np.sqrt(n)))
-    ncols = int(np.ceil(n / nrows))
-    return nrows, ncols
+    return nrows, int(np.ceil(n / nrows))
 
 def make_trend_subplots(data, indicators):
     if not indicators or data.empty: return None
@@ -115,7 +109,6 @@ def make_distribution_plots(df, indicators, plot_type='histogram'):
     return fig
 
 def make_correlation_heatmap(data, indicators):
-    """TÍNH NĂNG MỚI: Biểu đồ Heatmap thể hiện Ma trận tương quan"""
     if len(indicators) < 2 or data.empty: 
         return None
     corr_matrix = data[indicators].corr()
@@ -136,19 +129,17 @@ def show_seasonal_boxplot(data, indicator):
 
     col1, col2 = st.columns(2)
     with col1:
-        month_fig = px.box(subset, x='month', y=indicator, points='outliers', title=f'{indicator} distribution by Month')
-        st.plotly_chart(month_fig, use_container_width=True)
+        st.plotly_chart(px.box(subset, x='month', y=indicator, points='outliers', title=f'{indicator} Distribution by Month'), use_container_width=True)
     with col2:
-        season_fig = px.box(subset, x='season', y=indicator, points='outliers', category_orders={'season': ['Winter', 'Spring', 'Summer', 'Autumn']}, title=f'{indicator} distribution by Season')
-        st.plotly_chart(season_fig, use_container_width=True)
+        st.plotly_chart(px.box(subset, x='season', y=indicator, points='outliers', category_orders={'season': ['Winter', 'Spring', 'Summer', 'Autumn']}, title=f'{indicator} Distribution by Season'), use_container_width=True)
 
+# Diagnostic module: Analyzes feature impact on a user-selected target variable using Pearson correlation and grouped scatter matrices
 def show_target_analysis(data, indicators, cluster_col='cluster_kmeans_3'):
     if len(indicators) < 2: return
     
     st.markdown("Select a **Target Indicator** to deeply analyze how other variables influence it:")
     target_var = st.selectbox("Target Variable:", indicators, index=indicators.index('DO') if 'DO' in indicators else 0)
 
-    # Tính toán ma trận tương quan
     corr_matrix = data[indicators].corr()
     target_corr = corr_matrix[[target_var]].drop(target_var).sort_values(by=target_var, ascending=True)
 
@@ -189,35 +180,64 @@ def show_target_analysis(data, indicators, cluster_col='cluster_kmeans_3'):
         fig_scatter.update_layout(height=350 * nrows, margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig_scatter, use_container_width=True)
 
-# ==========================================
-# 4. INTERACTIVE MAP (NATIVE PLOTLY)
-# ==========================================
-def render_interactive_map(df_data, df_meta):
+def show_threshold_alerts(data, indicators):
+    """Automated Early Warning System based on predefined safety thresholds"""
+    # Define safety limits (Can be adjusted based on actual environmental standards)
+    thresholds = {}
+    if 'DO' in indicators: thresholds['DO'] = {'limit': 4.0, 'type': 'min', 'name': 'DO (Oxygen Depletion)'}
+    if 'COD' in indicators: thresholds['COD'] = {'limit': 15.0, 'type': 'max', 'name': 'COD (Upper Limit Exceeded)'}
+    if 'NH4N' in indicators: thresholds['NH4N'] = {'limit': 0.5, 'type': 'max', 'name': 'NH4N (Ammonia Pollution)'}
+
+    alerts = []
+    
+    for ind, rule in thresholds.items():
+        if rule['type'] == 'max':
+            violation = data[data[ind] > rule['limit']]
+        else:
+            violation = data[data[ind] < rule['limit']]
+            
+        if not violation.empty:
+            alerts.append({
+                'indicator': rule['name'],
+                'count': len(violation),
+                'worst_val': violation[ind].max() if rule['type'] == 'max' else violation[ind].min(),
+                'limit': rule['limit']
+            })
+
+    if not alerts:
+        st.success("System Status: Normal. No threshold violations detected in the current dataset.")
+    else:
+        st.error(f"AUTOMATED ALERT: {len(alerts)} INDICATORS EXCEEDED SAFE THRESHOLDS!")
+        
+        # Display alert cards
+        alert_cols = st.columns(len(alerts))
+        for idx, alert in enumerate(alerts):
+            with alert_cols[idx]:
+                st.warning(
+                    f"**{alert['indicator']}**\n\n"
+                    f"- Violation Count: **{alert['count']}** records\n"
+                    f"- Most Extreme Value: **{alert['worst_val']:.2f}** (Threshold: {alert['limit']})"
+                )
+
+# Spatiotemporal mapping component with dynamic basemap and cross-filtering support
+def render_interactive_map(df_data, df_meta, map_style):
     meta_coords = df_meta[[
         'MonitoringLocationIdentifier',
         'MonitoringLocationName',
         'LatitudeMeasure_WGS84',
         'LongitudeMeasure_WGS84'
-    ]].drop_duplicates()
-    
-    meta_coords = meta_coords.rename(
-        columns={
-            'LatitudeMeasure_WGS84': 'lat',
-            'LongitudeMeasure_WGS84': 'lon',
-            'MonitoringLocationName': 'StationName'
-        }
+    ]].drop_duplicates().rename(
+        columns={'LatitudeMeasure_WGS84': 'lat', 'LongitudeMeasure_WGS84': 'lon', 'MonitoringLocationName': 'StationName'}
     )
 
     cluster_col = 'cluster_kmeans_3'
-    
     if cluster_col not in df_data.columns:
         st.warning(f"Column '{cluster_col}' not found. Map will display without cluster colors.")
         cluster_col = None
 
+    # Fetch latest known status per station to avoid map overlapping for historical data
     df_map = df_data.sort_values('MonitoringDate').drop_duplicates(subset=['MonitoringLocationIdentifier'], keep='last')
-    
-    df_map = df_map[['MonitoringLocationIdentifier'] + ([cluster_col] if cluster_col else [])]
-    df_map = df_map.merge(meta_coords, on='MonitoringLocationIdentifier', how='inner')
+    df_map = df_map[['MonitoringLocationIdentifier'] + ([cluster_col] if cluster_col else [])].merge(meta_coords, on='MonitoringLocationIdentifier', how='inner')
 
     if df_map.empty or 'lat' not in df_map.columns or 'lon' not in df_map.columns:
         st.warning("Current dataset does not contain station coordinates.")
@@ -226,92 +246,69 @@ def render_interactive_map(df_data, df_meta):
     if cluster_col:
         df_map[cluster_col] = df_map[cluster_col].astype(str)
 
-    color_map = {
-        '0': '#28a745', # Xanh lá (Green)
-        '1': '#ffc107', # Vàng (Yellow)
-        '2': '#dc3545'  # Đỏ (Red)
-    }
-
     fig = px.scatter_mapbox(
-        df_map,
-        lat='lat',
-        lon='lon',
-        hover_name='StationName',
+        df_map, lat='lat', lon='lon', hover_name='StationName',
         hover_data={'MonitoringLocationIdentifier': True, cluster_col: True} if cluster_col else {'MonitoringLocationIdentifier': True},
         color=cluster_col if cluster_col else None,
-        color_discrete_map=color_map,
-        zoom=4,
-        height=500,
+        color_discrete_map={'0': '#28a745', '1': '#ffc107', '2': '#dc3545'},
+        size=[12] * len(df_map),  # Increase point size for better visibility
+        size_max=12,  # Maximum size for the points
+        zoom=4, height=500,
     )
 
-    fig.update_layout(mapbox_style='carto-positron', margin={'r':0,'t':0,'l':0,'b':0})
+    # Dynamic raster tile configuration based on user selection
+    if map_style == "esri":
+        fig.update_layout(
+            mapbox_style="white-bg",
+            mapbox_layers=[{"below": 'traces', "sourcetype": "raster", "sourceattribution": "Esri", "source": ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"]}],
+            margin={'r':0,'t':0,'l':0,'b':0}
+        )
+    else:
+        fig.update_layout(mapbox_style=map_style, margin={'r':0,'t':0,'l':0,'b':0})
 
     map_event = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
+    return map_event.selection['points'][0]['customdata'][0] if map_event and len(map_event.selection['points']) > 0 else None
 
-    selected_station = None
-    if map_event and len(map_event.selection['points']) > 0:
-        selected_station = map_event.selection['points'][0]['customdata'][0]
-        
-    return selected_station
-
-# ==========================================
-# 5. MAIN APP
-# ==========================================
 def main():
     df_land, df_ocean, df_meta = load_data()
     
-    # SIDEBAR
     st.sidebar.title("Dashboard Options")
     st.sidebar.markdown("---")
     
-    dataset_type = st.sidebar.radio(
-        "Monitoring environment:",
-        ('Surface water data', 'Ocean data')
-    )
-    
-    if dataset_type == 'Surface water data':
-        data = prepare_data(df_land)
-        title_prefix = "Surface water"
-    else:
-        data = prepare_data(df_ocean, zero_values={'< DL': 0})
-        title_prefix = "Ocean water"
+    dataset_type = st.sidebar.radio("Monitoring Environment:", ('Surface Water Data', 'Ocean Data'))
+    data = prepare_data(df_land) if dataset_type == 'Surface Water Data' else prepare_data(df_ocean, zero_values={'< DL': 0})
+    title_prefix = "Surface Water" if dataset_type == 'Surface Water Data' else "Ocean Water"
 
     st.sidebar.markdown("---")
-    view_mode = st.sidebar.radio(
-        "Spatial scope:",
-        ('System-wide', 'By region')
-    )
-
+    view_mode = st.sidebar.radio("Spatial Scope:", ('System-wide', 'By Region'))
     filtered_data = data.copy()
     current_meta = df_meta.copy()
 
-    if view_mode == 'By region':
-        if 'MonitoringLocationTypeName' in df_meta.columns:
-            location_types = sorted(df_meta['MonitoringLocationTypeName'].dropna().unique().tolist())
-            selected_types = st.sidebar.multiselect("Select location types:", options=location_types)
-            if selected_types:
-                current_meta = df_meta[df_meta['MonitoringLocationTypeName'].isin(selected_types)]
-                filtered_station_ids = current_meta['MonitoringLocationIdentifier'].unique()
-                filtered_data = filtered_data[filtered_data['MonitoringLocationIdentifier'].isin(filtered_station_ids)].copy()
-            else:
-                filtered_data = pd.DataFrame()
+    # Spatial hierarchy filtering
+    if view_mode == 'By Region' and 'MonitoringLocationTypeName' in df_meta.columns:
+        selected_types = st.sidebar.multiselect("Select Location Types:", options=sorted(df_meta['MonitoringLocationTypeName'].dropna().unique().tolist()))
+        if selected_types:
+            current_meta = df_meta[df_meta['MonitoringLocationTypeName'].isin(selected_types)]
+            filtered_data = filtered_data[filtered_data['MonitoringLocationIdentifier'].isin(current_meta['MonitoringLocationIdentifier'].unique())].copy()
+        else:
+            filtered_data = pd.DataFrame()
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Time Filter (Timeline)**")
     if not filtered_data.empty and 'YearMonth' in filtered_data.columns:
-        available_months = sorted(filtered_data['YearMonth'].dropna().unique().tolist())
-        options = ["All time"] + available_months
-        
         selected_month = st.sidebar.select_slider(
             "Slide to view historical data:", 
-            options=options,
-            value="All time"
+            options=["All Time"] + sorted(filtered_data['YearMonth'].dropna().unique().tolist()),
+            value="All Time"
         )
-        
-        if selected_month != "All time":
+        if selected_month != "All Time":
             filtered_data = filtered_data[filtered_data['YearMonth'] == selected_month]
 
-    # KHÔNG GIAN CHÍNH
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Map Display Options**")
+    map_style_option = st.sidebar.selectbox("Select Basemap Style:", ("Carto Positron (Light)", "OpenStreetMap (Standard)", "Esri Street (Map)"))
+    selected_map_style = {"Carto Positron (Light)": "carto-positron", "OpenStreetMap (Standard)": "open-street-map", "Esri Street (Map)": "esri"}[map_style_option]
+
     st.title(f"Water Quality Analysis System - {title_prefix}")
     
     if filtered_data.empty:
@@ -319,90 +316,69 @@ def main():
         return
 
     st.subheader("Spatial Clustering Map")
-    if selected_month == "All time":
-        st.markdown("*Map showing the **latest** known status of each station. Use the timeline slider in the sidebar to view historical map snapshots.*")
-    else:
-        st.markdown(f"*Map showing data for **{selected_month}**.*")
+    st.markdown(f"*Map showing {'the **latest** known status' if selected_month == 'All Time' else f'data for **{selected_month}**'}.*")
         
-    clicked_station = render_interactive_map(filtered_data, current_meta)
+    clicked_station = render_interactive_map(filtered_data, current_meta, map_style=selected_map_style)
     st.markdown("---")
 
+    # Map cross-filtering logic: Update dashboard state based on clicked marker
     if clicked_station:
-        st.markdown(f"**Display status:** Detailed view for station **{clicked_station}**")
+        st.markdown(f"**Display Status:** Detailed view for station **{clicked_station}**")
         display_data = data[data['MonitoringLocationIdentifier'] == clicked_station].copy()
         
         st.subheader("Station Information & Monitoring History")
         
         station_meta = df_meta[df_meta['MonitoringLocationIdentifier'] == clicked_station]
         cols_to_show = ['MonitoringLocationIdentifier', 'MonitoringLocationName', 'MonitoringLocationType', 'MonitoringLocationTypeName']
-        display_meta = station_meta[[col for col in cols_to_show if col in station_meta.columns]].reset_index(drop=True)
-        
         st.markdown("**Administrative Information:**")
-        st.dataframe(display_meta, use_container_width=True, hide_index=True)
+        st.dataframe(station_meta[[col for col in cols_to_show if col in station_meta.columns]].reset_index(drop=True), use_container_width=True, hide_index=True)
 
         indicators = get_indicator_columns(display_data)
-        st.markdown("**Monitoring Records (Time-series):**")
+        st.markdown("**Monitoring Records:**")
         if not display_data.empty:
             cluster_col = 'cluster_kmeans_3'
             hist_cols = ['MonitoringDate'] + ([cluster_col] if cluster_col in display_data.columns else []) + indicators
-            
             hist_df = display_data[hist_cols].sort_values('MonitoringDate', ascending=False)
             hist_df['MonitoringDate'] = hist_df['MonitoringDate'].dt.strftime('%Y-%m-%d %H:%M')
-            
             st.dataframe(hist_df, use_container_width=True, hide_index=True, height=250)
             
     else:
-        st.markdown(f"**Display status:** Aggregated data ({view_mode})")
+        st.markdown(f"**Display Status:** Aggregated data ({view_mode})")
         display_data = filtered_data.copy()
 
-    if display_data.empty:
-        return
-
+    if display_data.empty: return
     indicators = get_indicator_columns(display_data)
 
     st.markdown("---")
-    st.subheader("1. Overview KPIs")
+    st.subheader("1. Overview")
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Records", f"{len(display_data):,}")
     col2.metric("Number of Stations", f"{display_data['MonitoringLocationIdentifier'].nunique():,}")
     col3.metric("Number of Chemical Indicators", len(indicators))
-    st.markdown("---")
 
+    
+    st.markdown("---")
     st.subheader("2. Time Trends")
     trend_fig = make_trend_subplots(display_data, indicators)
-    if trend_fig:
-        st.plotly_chart(trend_fig, use_container_width=True)
-    st.markdown("---")
+    if trend_fig: st.plotly_chart(trend_fig, use_container_width=True)
 
+    st.markdown("---")
     st.subheader("3. Statistical Distribution")
-    dist_type = st.radio(
-        "Choose plot type:",
-        ("Boxplot", "Histogram"),
-        horizontal=True
-    )
-    
-    if "Boxplot" in dist_type:
-        box_fig = make_distribution_plots(display_data, indicators, plot_type='boxplot')
-        if box_fig:
-            st.plotly_chart(box_fig, use_container_width=True)
-    else:
-        hist_fig = make_distribution_plots(display_data, indicators, plot_type='histogram')
-        if hist_fig: st.plotly_chart(hist_fig, use_container_width=True)
-    st.markdown("---")
+    dist_type = st.radio("Choose plot type:", ("Boxplot", "Histogram"), horizontal=True)
+    plot_func = 'boxplot' if dist_type == "Boxplot" else 'histogram'
+    dist_fig = make_distribution_plots(display_data, indicators, plot_type=plot_func)
+    if dist_fig: st.plotly_chart(dist_fig, use_container_width=True)
 
-    # TÍNH NĂNG MỚI: CORRELATION HEATMAP
     if len(indicators) > 1:
-        st.subheader("4. Correlation Heatmap")
-        st.markdown("*Overview of relationships between all chemical indicators. Dark blue indicates strong positive correlation, dark red indicates strong negative correlation.*")
-        heatmap_fig = make_correlation_heatmap(display_data, indicators)
-        if heatmap_fig:
-            st.plotly_chart(heatmap_fig, use_container_width=True)
         st.markdown("---")
+        st.subheader("4. Correlation Heatmap")
+        heatmap_fig = make_correlation_heatmap(display_data, indicators)
+        if heatmap_fig: st.plotly_chart(heatmap_fig, use_container_width=True)
 
     if 'month' in display_data.columns and len(indicators) > 0:
+        st.markdown("---")
         st.subheader("5. Seasonal Analysis")
-        seasonal_choice = st.selectbox("Choose indicator:", indicators)
-        show_seasonal_boxplot(display_data, seasonal_choice)
+        show_seasonal_boxplot(display_data, st.selectbox("Choose indicator:", indicators))
 
     st.markdown("---")
     st.subheader("6. Diagnostic Analysis")
